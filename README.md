@@ -137,6 +137,12 @@ curl localhost:8082/status   # node2
 curl localhost:8083/status   # node3
 ```
 
+Listar os eventos persistidos no WAL local de um nó:
+
+```bash
+curl localhost:8081/events   # eventos gravados por node1, ordenados por timestamp
+```
+
 ## Testando o failover
 
 ```bash
@@ -160,6 +166,7 @@ Variáveis de ambiente de cada serviço, com o valor default usado no
 | `RAFT_NODE_ID` | *não setada* → usa o `hostname` do container (`node1`/`node2`/`node3`) | Identidade do nó no cluster Raft |
 | `RAFT_BIND_ADDR` | *não setada* → `<RAFT_NODE_ID>:7000` | Endereço TCP do transporte Raft |
 | `HTTP_ADDR` | *não setada* → `:8080` | Porta da API `/status`, mapeada no compose para `8081`/`8082`/`8083` no host |
+| `WAL_PATH` | `/data/wal.db` | Arquivo bbolt onde o líder grava cada evento recebido (WAL local) |
 
 ### `mock-server`
 
@@ -169,6 +176,44 @@ Variáveis de ambiente de cada serviço, com o valor default usado no
 | `POLL_MIN_DELAY` | `200ms` | Delay mínimo aleatório até um novo evento "aparecer" |
 | `POLL_MAX_DELAY` | `500ms` | Delay máximo aleatório até um novo evento "aparecer" |
 | `POLL_MAX_WAIT` | `30s` | Timeout do long polling (retorna `204` se não houver evento) |
+
+
+## Persistência (WAL)
+
+Cada réplica grava, em [bbolt](https://github.com/etcd-io/bbolt), todo evento
+que recebe **enquanto é líder** — um volume Docker nomeado por nó
+(`wal-node1`, `wal-node2`, `wal-node3`) monta o arquivo em `/data/wal.db`
+dentro do container. É um WAL local: não é replicado entre nós via Raft, então
+uma réplica que nunca foi líder mantém seu `wal.db` vazio.
+
+```mermaid
+flowchart LR
+    subgraph write["Escrita — só enquanto o nó é líder"]
+        direction TB
+        MS["mock-server<br/>GET /poll"] --> PW["Poll Worker"]
+        PW -->|"200 OK + evento"| HP["handlePollResponse"]
+        HP --> SE["SaveEvent(wal, event)"]
+        SE -->|"db.Update + fsync"| BK
+    end
+
+    subgraph read["Leitura — GET /events"]
+        direction TB
+        C["curl /events"] --> EH["eventsHandler"]
+        EH -->|"db.View + ForEach"| BK
+        EH -->|"sort by timestamp"| OUT["JSON array ordenado"]
+    end
+
+    BK[("bucket: events<br/>key = event.id (uuid)<br/>value = JSON bruto")] -.->|"arquivo em disco"| VOL[("volume Docker<br/>wal-nodeN:/data/wal.db")]
+```
+
+- Chave = `id` do evento (uuid); valor = o JSON completo recebido do `/poll`.
+- Cada gravação é uma transação bbolt com fsync — só é considerada concluída
+  depois de ir a disco.
+- Sobrevive a `docker compose stop/start` e a `docker compose down` (sem
+  `-v`) do respectivo nó, já que o volume nomeado não é removido.
+
+Para inspecionar o conteúdo, use `GET /events` (ver seção acima) — lista
+todos os eventos gravados naquele nó, ordenados por `timestamp`.
 
 ## Encerrar
 

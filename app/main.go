@@ -40,6 +40,7 @@ func main() {
 	httpAddr := mustEnv("HTTP_ADDR", ":8080")
 	mockServerURL := mustEnv("MOCK_SERVER_URL", "http://mock-server:8090/poll")
 	pollWorkers := envInt("POLL_WORKERS", 8)
+	walPath := mustEnv("WAL_PATH", "/data/wal.db")
 
 	peersEnv := os.Getenv("RAFT_PEERS")
 	if peersEnv == "" {
@@ -50,14 +51,21 @@ func main() {
 		log.Fatalf("invalid RAFT_PEERS: %v", err)
 	}
 
+	wal, err := OpenWAL(walPath)
+	if err != nil {
+		log.Fatalf("[%s] failed to open wal: %v", id, err)
+	}
+	defer wal.Close()
+
 	r, err := newRaftNode(id, bindAddr, peers)
 	if err != nil {
 		log.Fatalf("[%s] failed to start raft node: %v", id, err)
 	}
 
-	go leaderSemaphore(id, r, mockServerURL, pollWorkers)
+	go leaderSemaphore(id, r, mockServerURL, pollWorkers, wal)
 
 	http.HandleFunc("/status", statusHandler(id, r, peers))
+	http.HandleFunc("/events", eventsHandler(wal))
 
 	log.Printf("[%s] http status API listening on %s (raft bind %s)", id, httpAddr, bindAddr)
 	log.Fatal(http.ListenAndServe(httpAddr, nil))

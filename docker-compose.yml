@@ -18,6 +18,9 @@ services:
       RAFT_PEERS: "node1=node1:7000,node2=node2:7000,node3=node3:7000"
       MOCK_SERVER_URL: "http://mock-server:8090/poll"
       POLL_WORKERS: "2"
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node1:/data
     depends_on:
       - mock-server
     ports:
@@ -32,6 +35,9 @@ services:
       RAFT_PEERS: "node1=node1:7000,node2=node2:7000,node3=node3:7000"
       MOCK_SERVER_URL: "http://mock-server:8090/poll"
       POLL_WORKERS: "2"
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node2:/data
     depends_on:
       - mock-server
     ports:
@@ -46,6 +52,9 @@ services:
       RAFT_PEERS: "node1=node1:7000,node2=node2:7000,node3=node3:7000"
       MOCK_SERVER_URL: "http://mock-server:8090/poll"
       POLL_WORKERS: "2"
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node3:/data
     depends_on:
       - mock-server
     ports:
@@ -56,3 +65,8 @@ services:
 networks:
   cluster:
     driver: bridge
+
+volumes:
+  wal-node1:
+  wal-node2:
+  wal-node3:

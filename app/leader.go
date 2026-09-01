@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	"go.etcd.io/bbolt"
 )
 
 // leaderSemaphore watches raft leadership transitions (RF03/RF04) and
 // starts/stops the long-polling loop accordingly — only the current leader
 // polls the mock-server; a node that loses leadership cancels its loop
 // immediately.
-func leaderSemaphore(nodeID string, r *raft.Raft, mockServerURL string, workers int) {
+func leaderSemaphore(nodeID string, r *raft.Raft, mockServerURL string, workers int, wal *bbolt.DB) {
 	var cancel context.CancelFunc
 	stop := func() {
 		if cancel != nil {
@@ -27,7 +28,7 @@ func leaderSemaphore(nodeID string, r *raft.Raft, mockServerURL string, workers 
 	for isLeader := range r.LeaderCh() {
 		stop()
 		if isLeader {
-			cancel = startPolling(nodeID, mockServerURL, workers)
+			cancel = startPolling(nodeID, mockServerURL, workers, wal)
 		}
 	}
 }
@@ -37,7 +38,7 @@ func leaderSemaphore(nodeID string, r *raft.Raft, mockServerURL string, workers 
 // is lost. Running several long-poll connections in parallel against the
 // mock-server is what actually raises throughput — a single sequential loop
 // is bottlenecked by the mock-server's own per-call delay.
-func startPolling(nodeID, mockServerURL string, workers int) context.CancelFunc {
+func startPolling(nodeID, mockServerURL string, workers int, wal *bbolt.DB) context.CancelFunc {
 	ctx, cancel := context.WithCancel(context.Background())
 	log.Printf("[%s] became LEADER — starting polling loop (%d concurrent workers)", nodeID, workers)
 
@@ -51,14 +52,14 @@ func startPolling(nodeID, mockServerURL string, workers int) context.CancelFunc 
 	}
 
 	for i := 0; i < workers; i++ {
-		go pollLoop(ctx, nodeID, mockServerURL, client)
+		go pollLoop(ctx, nodeID, mockServerURL, client, wal)
 	}
 	return cancel
 }
 
 // pollLoop repeatedly long-polls the mock-server and prints received events
 // (RF03/RF07) until ctx is cancelled.
-func pollLoop(ctx context.Context, nodeID, url string, client *http.Client) {
+func pollLoop(ctx context.Context, nodeID, url string, client *http.Client, wal *bbolt.DB) {
 	for ctx.Err() == nil {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -77,11 +78,11 @@ func pollLoop(ctx context.Context, nodeID, url string, client *http.Client) {
 			continue
 		}
 
-		handlePollResponse(nodeID, resp)
+		handlePollResponse(nodeID, resp, wal)
 	}
 }
 
-func handlePollResponse(nodeID string, resp *http.Response) {
+func handlePollResponse(nodeID string, resp *http.Response, wal *bbolt.DB) {
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
@@ -90,6 +91,9 @@ func handlePollResponse(nodeID string, resp *http.Response) {
 		if err := json.NewDecoder(resp.Body).Decode(&event); err != nil {
 			log.Printf("[%s] decode error: %v", nodeID, err)
 			return
+		}
+		if err := SaveEvent(wal, event); err != nil {
+			log.Printf("[%s] wal write error: %v", nodeID, err)
 		}
 		log.Printf("[%s][LEADER] event received: %+v", nodeID, event)
 	case http.StatusNoContent:

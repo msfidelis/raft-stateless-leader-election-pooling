@@ -167,3 +167,147 @@ leader-election-pooling/
    de forma consistente entre eles.
 5. Subir novamente o nó parado — ele deve se reintegrar ao cluster como
    follower, sem interromper o líder atual.
+
+## 8. Extensão — Persistência de Eventos com bbolt (WAL)
+
+### 8.1 Objetivo
+
+Persistir em disco, por réplica, cada evento recebido do mock-server enquanto
+o nó é líder, usando [bbolt](https://github.com/etcd-io/bbolt) como um
+write-ahead log (WAL) append-only. Garante que o histórico de eventos
+processados por uma réplica sobrevive a restarts do container, sem alterar o
+comportamento do cluster Raft em si.
+
+### 8.2 Requisitos Funcionais (novos)
+
+- RF08 — Sempre que o nó líder receber um evento com sucesso (`200 OK`) do
+  `/poll`, ele deve gravar esse evento em um bucket bbolt local antes de
+  imprimi-lo no stdout.
+- RF09 — A gravação deve ser durável: a transação bbolt só é considerada
+  concluída após o commit ir a disco (fsync).
+- RF10 — Cada réplica (`node1`, `node2`, `node3`) tem seu próprio arquivo
+  `.db` bbolt, persistido em um volume Docker nomeado individual, sobrevivendo
+  a `docker compose stop/start` daquele nó.
+- RF11 — O WAL é estritamente local: não há replicação do conteúdo do bbolt
+  entre nós via Raft. Um nó que nunca foi líder terá seu bbolt vazio (ou só
+  com os eventos do período em que foi líder).
+- RF12 — Cada nó expõe `GET /events`, listando todo o conteúdo do seu bucket
+  `events` em JSON, ordenado pelo campo `timestamp` de cada evento (não pela
+  chave do bucket, que é o uuid).
+
+### 8.3 Requisitos Não-Funcionais (novos)
+
+- RNF05 — Não altera a FSM do Raft (RNF01) nem os stores do Raft (RNF02) — a
+  persistência do WAL é inteiramente desacoplada do protocolo de consenso.
+- RNF06 — A escrita no bbolt não deve travar o loop de polling além do
+  necessário: cada evento abre e fecha sua própria transação `Update` (bbolt é
+  single-writer por design, então múltiplos poll workers gravando ao mesmo
+  tempo são automaticamente serializados pelo próprio bbolt, sem lock extra no
+  código da aplicação).
+
+### 8.4 Decisões Técnicas (resumo)
+
+| Decisão | Escolha | Justificativa |
+|---|---|---|
+| Escopo do WAL | Local por réplica — só quem é líder no momento grava, no seu próprio volume | Mantém a FSM no-op e o RNF02 intactos; sem round-trip de consenso por evento, não afeta a vazão do polling. |
+| Chave do bucket | `event.id` (uuid gerado pelo mock-server) | Permite lookup direto por id. Como consequência, a iteração natural do bucket (ordenada por bytes da chave) **não reflete a ordem cronológica de chegada** — quem precisar da ordem de chegada deve ordenar pelo campo `timestamp` já presente no valor, não confiar na ordem das chaves. |
+| Volumes | 1 volume Docker nomeado por nó (`wal-node1`, `wal-node2`, `wal-node3`) montado em `/data` | bbolt não suporta múltiplos processos escrevendo no mesmo arquivo `.db` simultaneamente; replica a identidade estável de um StatefulSet, onde cada réplica mantém seu próprio estado em disco. |
+| Durabilidade | Fsync por transação (`bbolt.Options` padrão, `NoSync: false`) | É o que dá sentido a chamar isso de WAL — um evento só é considerado salvo depois do commit ir a disco. |
+
+### 8.5 Design
+
+- Um único arquivo bbolt por nó: `/data/wal.db` (path configurável via env
+  `WAL_PATH`, default `/data/wal.db`).
+- Um único bucket: `events`.
+- Chave = `[]byte(event.ID)`; valor = o JSON bruto do evento, exatamente como
+  recebido do `/poll`.
+- `bbolt.DB` é aberto uma única vez no startup do processo (`main.go`) e
+  reaproveitado por todos os poll workers durante o período em que o nó é
+  líder.
+- Cada evento recebido em `handlePollResponse` é persistido numa transação
+  `db.Update(...)` própria, antes do `log.Printf` de impressão; erro de
+  gravação é logado mas não derruba o loop de polling.
+- `GET /events` (RF12) faz um único `db.View(...)`, itera o bucket inteiro
+  com `ForEach`, e ordena o resultado em memória por `timestamp` antes de
+  responder — aceitável para o volume de dados de uma POC; não pagina.
+
+### 8.6 Estrutura de diretórios (novos arquivos)
+
+```
+app/
+├── ...
+└── wal.go          # abertura do bbolt.DB + função SaveEvent(event)
+```
+
+### 8.7 Contrato interno — `wal.go`
+
+```go
+func OpenWAL(path string) (*bbolt.DB, error)
+func SaveEvent(db *bbolt.DB, event map[string]any) error
+```
+
+- `OpenWAL` garante que o diretório de `path` existe, abre o `bbolt.DB` e cria
+  o bucket `events` se não existir (`db.Update` com
+  `CreateBucketIfNotExists`).
+- `SaveEvent` extrai `event["id"]` como string, faz `json.Marshal(event)` e
+  grava `bucket.Put([]byte(id), jsonBytes)` dentro de uma transação
+  `db.Update`.
+
+### 8.8 docker-compose — volumes
+
+```yaml
+services:
+  node1:
+    ...
+    environment:
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node1:/data
+  node2:
+    ...
+    environment:
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node2:/data
+  node3:
+    ...
+    environment:
+      WAL_PATH: "/data/wal.db"
+    volumes:
+      - wal-node3:/data
+
+volumes:
+  wal-node1:
+  wal-node2:
+  wal-node3:
+```
+
+### 8.9 Plano de Execução (tasks)
+
+1. Adicionar dependência `go.etcd.io/bbolt` ao módulo `app`.
+2. Criar `app/wal.go` com `OpenWAL` e `SaveEvent`.
+3. `main.go`: ler `WAL_PATH` (default `/data/wal.db`), abrir o WAL no
+   startup, `defer db.Close()`, e passar o `*bbolt.DB` adiante para
+   `leaderSemaphore`/`startPolling`/`pollLoop`.
+4. `leader.go` / `handlePollResponse`: após decodificar o evento com sucesso
+   (`200 OK`), chamar `SaveEvent` antes do `log.Printf`.
+5. `docker-compose.yml`: declarar os 3 volumes nomeados, montá-los em `/data`
+   nos respectivos serviços `node1`/`node2`/`node3`, e setar `WAL_PATH`.
+6. `README.md`: documentar a nova variável `WAL_PATH` e o comportamento do
+   WAL (seção Configuração + uma nota no Fluxo/Arquitetura).
+
+### 8.10 Critérios de Aceite
+
+1. `docker compose up` — o líder grava cada evento recebido no seu `wal.db`
+   local.
+2. Inspecionar o arquivo do líder (ex.: `docker compose exec <líder> sh` e
+   usar a CLI `bbolt` ou um script Go de leitura) mostra uma entrada por
+   evento impresso no log, com a chave batendo com o `id` do evento.
+3. `docker compose stop <líder>` seguido de `docker compose start <líder>` —
+   o `wal.db` daquele nó permanece intacto (conteúdo preservado no volume),
+   mesmo o nó tendo perdido a liderança nesse meio tempo.
+4. `docker compose down` (sem `-v`) seguido de `docker compose up` novamente
+   — os volumes nomeados preservam o conteúdo do bbolt entre subidas
+   completas do cluster.
+5. Um nó que nunca assumiu liderança tem `wal.db` vazio (só o bucket
+   `events` criado, sem entradas).
