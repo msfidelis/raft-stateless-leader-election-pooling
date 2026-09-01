@@ -147,11 +147,28 @@ docker compose start node2    # volta ao cluster como follower
 
 ## Configuração
 
-| Variável (env) | Onde | Efeito |
+Variáveis de ambiente de cada serviço, com o valor default usado no
+`docker-compose.yml`.
+
+### `app` (node1, node2, node3)
+
+| Variável | Default (compose) | Efeito |
 |---|---|---|
-| `POLL_WORKERS` | `app` | Nº de goroutines de long polling concorrentes quando o nó é líder (vazão de eventos) |
-| `POLL_MIN_DELAY` / `POLL_MAX_DELAY` | `mock-server` | Intervalo aleatório até um novo evento "aparecer" |
-| `POLL_MAX_WAIT` | `mock-server` | Timeout do long polling (retorna `204` se não houver evento) |
+| `RAFT_PEERS` | `node1=node1:7000,node2=node2:7000,node3=node3:7000` | Lista estática de peers do cluster (obrigatória) |
+| `MOCK_SERVER_URL` | `http://mock-server:8090/poll` | Endpoint de long polling consultado quando o nó é líder |
+| `POLL_WORKERS` | `2` | Nº de goroutines de long polling concorrentes quando o nó é líder (vazão de eventos) |
+| `RAFT_NODE_ID` | *não setada* → usa o `hostname` do container (`node1`/`node2`/`node3`) | Identidade do nó no cluster Raft |
+| `RAFT_BIND_ADDR` | *não setada* → `<RAFT_NODE_ID>:7000` | Endereço TCP do transporte Raft |
+| `HTTP_ADDR` | *não setada* → `:8080` | Porta da API `/status`, mapeada no compose para `8081`/`8082`/`8083` no host |
+
+### `mock-server`
+
+| Variável | Default (compose) | Efeito |
+|---|---|---|
+| `HTTP_ADDR` | `:8090` | Porta HTTP do serviço |
+| `POLL_MIN_DELAY` | `200ms` | Delay mínimo aleatório até um novo evento "aparecer" |
+| `POLL_MAX_DELAY` | `500ms` | Delay máximo aleatório até um novo evento "aparecer" |
+| `POLL_MAX_WAIT` | `30s` | Timeout do long polling (retorna `204` se não houver evento) |
 
 ## Encerrar
 
