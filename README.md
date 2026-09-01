@@ -175,5 +175,3 @@ Variáveis de ambiente de cada serviço, com o valor default usado no
 ```bash
 docker compose down
 ```
-
-Detalhes de requisitos, arquitetura e decisões técnicas: veja [SPEC.md](SPEC.md).
