@@ -1,14 +1,14 @@
 # Leader Election & Long Polling com Raft
 
 POC de eleição de líder distribuída usando [hashicorp/raft](https://github.com/hashicorp/raft).
-3 réplicas do mesmo binário formam um cluster; **apenas o líder** faz long polling
-numa API mockada e imprime os eventos recebidos. Se o líder cai, o cluster reelege
+3 réplicas da mesma aplicação formam um cluster; **apenas o líder** faz long polling
+numa API mockada e printa os eventos recebidos. Se o líder cai, o cluster reelege
 outro em segundos, sem intervenção manual.
 
 ## Estrutura
 
 ```
-app/            # binário que participa do cluster Raft (eleição + polling + /status)
+app/            # aplicação que participa do cluster Raft (eleição + polling + /status)
 mock-server/    # API mockada com long polling real (eventos gerados com faker)
 docker-compose.yml
 ```
@@ -69,7 +69,7 @@ flowchart TB
     Host -->|":8090"| MS
 ```
 
-Cada nó `app` roda o mesmo binário: núcleo Raft (eleição/replicação via TCP na
+Cada nó `app` roda a mesma aplicação: núcleo Raft (eleição/replicação via TCP na
 porta `7000`, só na rede interna), um "leader semaphore" que ouve `LeaderCh()`
 e liga/desliga os workers de polling, e uma API `/status` exposta ao host.
 Apenas o `mock-server` e os endpoints `/status` são acessíveis de fora do
